@@ -6,6 +6,7 @@ Does one of these happen in your game?
 
 - 🖱️ **You can't see your cursor in menus.** You have to click around blindly.
 - 🖱️ **The cursor stays on screen while you play**, stuck in the middle or following your aim.
+- 🖱️ **The cursor disappears after you Cmd+Tab out and back in.**
 
 If so, your game's Wine engine probably has this bug, and one command fixes it.
 
@@ -15,12 +16,13 @@ If so, your game's Wine engine probably has this bug, and one command fixes it.
 
 ## Why it happens (short version)
 
-Porting Kit games carry their own copy of Wine. Some of those Wine engines, the CrossOver-based ones (with **CX** in the name), have two built-in changes:
+Porting Kit games carry their own copy of Wine. Some of those Wine engines, the CrossOver-based ones (with **CX** in the name), have three built-in changes:
 
 1. **In fullscreen the cursor is always hidden**, even in menus where the game wants it shown.
 2. **When the game asks to hide the cursor, an arrow is shown instead**, so you see it while playing.
+3. **When you Cmd+Tab back into a fullscreen game, the cursor is hidden again**, whatever the game wants.
 
-This tool finds exactly those two spots in the game's Wine and turns them off. It changes **2 bytes** in one file and keeps a backup. If the tool doesn't recognise the code exactly, it changes **nothing**.
+This tool finds exactly those three spots in the game's Wine and turns them off. It changes **9 bytes** in one file and keeps a backup. If the tool doesn't recognise the code exactly, it changes **nothing**.
 
 ---
 
@@ -87,8 +89,9 @@ The fix patches `winemac.so`, Wine's macOS display driver, inside the app bundle
 |---|---|---|
 | `-[WineApplicationController updateCursor:]`: `if ([self hasFullscreenWindow]) clientWantsCursorHidden = YES;` | `je` (`0x74`) | `jmp` (`0xEB`), so the check is skipped |
 | `macdrv_SetCursor`: `if (!cursor_name && !cursor_frames) cursor_name = CFSTR("arrowCursor");` | `jne` (`0x75`) | `jmp` (`0xEB`), so a NULL cursor hides the cursor like upstream Wine |
+| `macdrv_update_fullscreen_windows` block, which runs when the app is activated: `[controller hasFullscreenWindow] ? [controller hideCursor] : [controller unhideCursor]` | `mov sel,%rsi` (7 bytes) | `pop rbx; pop r14; pop rbp; ret; nop; nop`, so it returns before overriding the game's cursor state |
 
-The script doesn't use fixed offsets. It searches for each instruction pattern, then confirms it by following the pointers: the Objective-C selector must be `hasFullscreenWindow`, and the CFString must be `"arrowCursor"`. It only patches if it finds exactly the two expected locations. The original is saved as `winemac.so.before-cursor-fix` next to it.
+The script doesn't use fixed offsets. It searches for each instruction pattern, then confirms it by following the pointers: the Objective-C selectors must be `hasFullscreenWindow`, `hideCursor` and `unhideCursor`, the CFString must be `"arrowCursor"`, and the function prologue must match what the early return pops. It only patches if it finds exactly the three expected locations. Games fixed with an older version of this tool get just the missing patch. The original is saved as `winemac.so.before-cursor-fix` next to it.
 
 The script uses only `bash` and `/usr/bin/perl`, which are included with macOS, so you don't need to install anything.
 

@@ -1,13 +1,15 @@
 #!/bin/bash
 # mac-wine-cursor-fix
 # Fixes the mouse cursor in Porting Kit / Wineskin games that use a CrossOver-based
-# Wine engine (e.g. WS12WineCX26.3_DXMT). Those engines contain two changes that
+# Wine engine (e.g. WS12WineCX26.3_DXMT). Those engines contain three changes that
 # break games which hide the cursor:
 #   1. In fullscreen, the cursor is ALWAYS hidden (so you can't see it in menus).
 #   2. When the game asks to hide the cursor, an arrow is shown instead
 #      (so it stays on screen while you play).
-# This script finds those two exact pieces of code in the game's winemac.so and
-# turns them off (one byte each). It refuses to touch anything it doesn't recognise.
+#   3. After Cmd+Tab back into a fullscreen game, the cursor is hidden again,
+#      whatever the game wants.
+# This script finds those exact pieces of code in the game's winemac.so and
+# turns them off (9 bytes in total). It refuses to touch anything it doesn't recognise.
 #
 # Usage:
 #   fix-cursor.sh "/path/to/Game.app"            check and fix
@@ -94,7 +96,7 @@ while ($b =~ /\x48\x8b\x35(.{4})\xff\x15(.{4})\x84\xc0([\x74\xeb])\x07\xc6\x83(.
     my $sel = ptr(rip($start, 7));
     next unless defined $sel && cstr($sel) eq 'hasFullscreenWindow';
     my $jo = $start + 15;
-    if ($3 eq "\xeb") { $done++; } else { push @patches, [$jo, 0x74, 0xeb, 'fullscreen always hides the cursor']; }
+    if ($3 eq "\xeb") { $done++; } else { push @patches, [$jo, "\xeb", 'fullscreen always hides the cursor']; }
 }
 
 # 2) macdrv_SetCursor:  mov %r14,%rax ; or %r15,%rax ; jne +N ; lea cfstr(%rip),%rdi
@@ -105,16 +107,32 @@ while ($b =~ /\x4c\x89\xf0\x4c\x09\xf8([\x75\xeb])(.)\x48\x8d\x3d(.{4})/gs) {
     my $cfo = v2f($cf); next unless defined $cfo;
     my $sp = unpack('Q<', substr($b, $cfo + 16, 8)) % (2**48);
     next unless cstr($sp) eq 'arrowCursor';
-    if ($1 eq "\xeb") { $done++; } else { push @patches, [$start + 6, 0x75, 0xeb, 'hidden cursor replaced by an arrow']; }
+    if ($1 eq "\xeb") { $done++; } else { push @patches, [$start + 6, "\xeb", 'hidden cursor replaced by an arrow']; }
+}
+
+# 3) macdrv_update_fullscreen_windows block (runs when the game comes back to the front,
+#    e.g. after Cmd+Tab):  [controller hasFullscreenWindow] ? hideCursor : unhideCursor
+#    -> return before that check, so the cursor keeps whatever state the game asked for.
+while ($b =~ /(\x48\x8b\x35.{4}|\x5b\x41\x5e\x5d\xc3\x90\x90)\x48\x89\xdf\x41\xff\xd6\x84\xc0\x48\x8d\x05(.{4})\x48\x8d\x0d(.{4})\x48\x0f\x44\xc8/gs) {
+    my $start = $-[0]; my $patched = substr($1, 0, 1) eq "\x5b";
+    my $un = ptr(rip($start + 15, 7)); my $hi = ptr(rip($start + 22, 7));
+    next unless defined $un && defined $hi && cstr($un) eq 'unhideCursor' && cstr($hi) eq 'hideCursor';
+    # The function must start with push rbp; mov rsp,rbp; push r14; push rbx (what we pop).
+    my $pro = rindex($b, "\x55\x48\x89\xe5\x41\x56\x53", $start);
+    next unless $pro >= 0 && $start - $pro < 0x80;
+    if ($patched) { $done++; next; }
+    my $sel = ptr(rip($start, 7));
+    next unless defined $sel && cstr($sel) eq 'hasFullscreenWindow';
+    push @patches, [$start, "\x5b\x41\x5e\x5d\xc3\x90\x90", 'cursor hidden again after Cmd+Tab in fullscreen'];
 }
 
 my $total = $done + @patches;
-if ($total != 2) { print "UNKNOWN\nfound $total of the 2 expected code locations\n"; exit 0; }
+if ($total != 3) { print "UNKNOWN\nfound $total of the 3 expected code locations\n"; exit 0; }
 if (!@patches) { print "FIXED\n"; exit 0; }
 print "NEEDS:" . scalar(@patches) . "\n";
-print "  - $_->[3]\n" for @patches;
+print "  - $_->[2]\n" for @patches;
 if ($write) {
-    for (@patches) { substr($b, $_->[0], 1) = chr($_->[2]); }
+    for (@patches) { substr($b, $_->[0], length($_->[1])) = $_->[1]; }
     open(my $o, '>:raw', "$file.tmp") or die "cannot write\n"; print $o $b; close $o;
     rename("$file.tmp", $file) or die "cannot replace file\n";
 }
